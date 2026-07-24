@@ -15,9 +15,9 @@ const http = require('http');
 const PROJECT_DIR = path.resolve(__dirname, '..');
 const CDP_PORT = Number(process.env.ACCIO_CDP_PORT || 9333);
 const RELAY_PORT = Number(process.env.ACCIO_RELAY_PORT || 9334);
-const CHROME_EXE_WSL =
-  process.env.ACCIO_CHROME_EXE ||
-  '/mnt/c/Program Files/Google/Chrome/Application/chrome.exe';
+const platform = require('./platform');
+const CHROME_EXE =
+  process.env.ACCIO_CHROME_EXE || platform.chromeExe();
 const NODE_EXE_WIN =
   process.env.ACCIO_NODE_EXE || 'C:\\Program Files\\nodejs\\node.exe';
 const RELAY_JS_WIN = 'C:\\temp\\accio-proxy\\cdp-relay.js';
@@ -26,10 +26,12 @@ const ACCIO_URL = process.env.ACCIO_URL || 'https://www.accio.com/';
 
 /**
  * Get the Windows host IP as seen from WSL (default gateway).
+ * On native Windows, always 127.0.0.1 (no relay needed for local CDP).
  * @returns {string}
  */
 function windowsHostIp() {
   if (process.env.ACCIO_CDP_HOST) return process.env.ACCIO_CDP_HOST;
+  if (platform.IS_WIN) return '127.0.0.1';
   try {
     const out = execSync('ip route show', { encoding: 'utf-8' });
     for (const line of out.split('\n')) {
@@ -213,22 +215,20 @@ Get-NetTCPConnection -LocalPort ${CDP_PORT} -ErrorAction SilentlyContinue |
 function launchChromeWindows(winDataDir, opts = {}) {
   const { headless = false, url = ACCIO_URL } = opts;
 
-  // Ensure profile dir exists on Windows side
-  const wslProfile = winDataDir
-    .replace(/^([A-Za-z]):\\/, (_, d) => `/mnt/${d.toLowerCase()}/`)
-    .replace(/\\/g, '/');
+  // Ensure profile dir exists from current OS
+  const fsProfile = platform.IS_WIN
+    ? winDataDir
+    : winDataDir
+        .replace(/^([A-Za-z]):\\/, (_, d) => `/mnt/${d.toLowerCase()}/`)
+        .replace(/\\/g, '/');
   try {
-    fs.mkdirSync(wslProfile, { recursive: true });
+    fs.mkdirSync(fsProfile, { recursive: true });
   } catch (_) {
     /* may already exist */
   }
 
-  // Kill previous chrome for this profile
   const fragment = path.basename(winDataDir.replace(/\\/g, '/'));
   killChromeProfile(fragment);
-
-  // Small delay after kill
-  // (caller can sleep if needed)
 
   const args = [
     `--remote-debugging-port=${CDP_PORT}`,
@@ -245,11 +245,14 @@ function launchChromeWindows(winDataDir, opts = {}) {
   args.push(url);
 
   console.log(
-    `[relay] abrindo Chrome (WSL→Windows) profile=${winDataDir} headless=${headless}`,
+    `[relay] abrindo Chrome profile=${winDataDir} exe=${CHROME_EXE} headless=${headless}`,
   );
-  const child = spawn(CHROME_EXE_WSL, args, {
+  const child = spawn(CHROME_EXE, args, {
     stdio: 'ignore',
     detached: true,
+  });
+  child.on('error', (err) => {
+    console.error(`[relay] falha ao spawn Chrome: ${err.message}`);
   });
   child.unref();
   return child;
@@ -294,11 +297,20 @@ Start-Process -FilePath '${NODE_EXE_WIN}' -ArgumentList @('${RELAY_JS_WIN}','${R
  * @returns {Promise<{host: string, port: number}>}
  */
 async function bootstrapCdp(winDataDir, opts = {}) {
+  // On native Windows: Chrome CDP is already on 127.0.0.1 — no WSL relay.
+  if (platform.IS_WIN) {
+    const host = '127.0.0.1';
+    const port = CDP_PORT;
+    launchChromeWindows(winDataDir, opts);
+    await sleep(1500);
+    await waitCdpHttp(host, port, 45000);
+    return { host, port };
+  }
+
   const host = windowsHostIp();
   const port = RELAY_PORT;
 
   launchChromeWindows(winDataDir, opts);
-  // Give Chrome a moment to start after kill
   await sleep(1500);
   await waitWindowsCdpLocal(45);
   launchRelayWindows();
@@ -315,7 +327,7 @@ module.exports = {
   CDP_PORT,
   RELAY_PORT,
   ACCIO_URL,
-  CHROME_EXE_WSL,
+  CHROME_EXE,
   windowsHostIp,
   waitTcp,
   waitCdpHttp,

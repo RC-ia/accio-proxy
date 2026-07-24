@@ -4,6 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const platform = require('./platform');
 
 const PROJECT_DIR = path.resolve(__dirname, '..');
 const ACCOUNTS_FILE = path.join(PROJECT_DIR, 'accounts.json');
@@ -105,8 +106,13 @@ function add(name) {
   // Windows path must use backslashes — path.join() on Linux would mess it up.
   const win_data_dir = `${WIN_PROFILES_BASE}\\${safeName}`;
 
-  // Create WSL profile dir
+  // Create local + Windows-facing profile dirs
   fs.mkdirSync(user_data_dir, { recursive: true });
+  try {
+    platform.ensureProfileDir(name);
+  } catch (_) {
+    /* best-effort */
+  }
 
   const account = {
     name,
