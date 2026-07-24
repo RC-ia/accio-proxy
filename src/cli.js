@@ -51,8 +51,11 @@ async function optionLogin() {
 
   console.log('');
   console.log(`🌐 Abrindo Chrome para a conta "${name}"…`);
-  console.log('   Faça o login no Accio no navegador que abrir.');
-  console.log('   Quando terminar o login, volte aqui e pressione Enter.');
+  console.log('   Modo: Chrome real + CDP (melhor chance de login Google).');
+  console.log('   1) Faça o login no Accio / Google no navegador que abrir.');
+  console.log('   2) Se o Google disser "navegador inseguro", feche o Chrome');
+  console.log('      normal e use um profile dedicado (opção 5).');
+  console.log('   3) Quando terminar o login, volte aqui e pressione Enter.');
   console.log('');
 
   try {
@@ -64,7 +67,13 @@ async function optionLogin() {
 
   await question('Pressione Enter quando o login estiver concluído…');
   console.log('✅ Perfil salvo. A sessão permanece no profile do Chrome.');
-  console.log(`   Profile Windows: ${account.win_data_dir}`);
+  const fresh = accounts.find(name) || account;
+  console.log(
+    `   user-data-dir: ${fresh.chrome_user_data_dir || fresh.win_data_dir}`,
+  );
+  if (fresh.chrome_profile_directory) {
+    console.log(`   profile-directory: ${fresh.chrome_profile_directory}`);
+  }
 }
 
 async function optionSwitch() {
@@ -162,9 +171,14 @@ async function optionCustomProfile() {
   }
 
   console.log('');
-  console.log('💡 Informe o caminho do profile Chrome que já existe.');
-  console.log('Ex: C:\\Users\\SeuNome\\AppData\\Local\\Google\\Chrome\\User Data\\Default\n');
-  console.log('Ou C:\\Users\\SeuNome\\AppData\\Local\\Google\\Chrome\\User Data');
+  console.log('💡 Caminho do profile Chrome (User Data, não o chrome.exe).');
+  console.log('   Ex: %LOCALAPPDATA%\\Google\\Chrome\\User Data');
+  console.log('   Ou: %LOCALAPPDATA%\\Google\\Chrome\\User Data\\Default');
+  console.log('   Ou: %LOCALAPPDATA%\\Google\\Chrome\\User Data\\Profile 1');
+  console.log('');
+  console.log('⚠️  Feche o Chrome completamente antes de usar o profile principal.');
+  console.log('   Se o Google bloquear login, prefira profile dedicado:');
+  console.log('   C:\\temp\\accio-profiles\\' + name);
   console.log('');
 
   const profilePath = (await question('Caminho do profile: ')).trim();
@@ -173,9 +187,13 @@ async function optionCustomProfile() {
     return;
   }
 
-  accounts.setCustomProfile(name, profilePath);
+  const resolved = accounts.setCustomProfile(name, profilePath);
   await browser.closeBrowser();
-  console.log(`✅ Profile personalizado definido para "${name}": ${profilePath}`);
+  console.log(`✅ Profile personalizado definido para "${name}"`);
+  console.log(`   user-data-dir: ${resolved.userDataDir}`);
+  console.log(
+    `   profile-directory: ${resolved.profileDirectory || '(padrão do user-data-dir)'}`,
+  );
 }
 
 async function optionServer() {

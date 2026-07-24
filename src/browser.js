@@ -1,9 +1,11 @@
 // src/browser.js
 // Playwright browser manager for Accio.
-// Windows-native: launchPersistentContext with local Chrome.
-// WSL: same, with CDP relay fallback if needed.
+// Windows-native: prefer launching real Chrome + CDP (Google login friendly),
+// fall back to launchPersistentContext with stealth flags.
 
 const { chromium } = require('playwright');
+const { spawn } = require('child_process');
+const http = require('http');
 const accounts = require('./accounts');
 const relay = require('./relay');
 const platform = require('./platform');
@@ -21,6 +23,7 @@ const ACCIO_URL = process.env.ACCIO_URL || 'https://www.accio.com/';
 const ACCIO_APP_URL = process.env.ACCIO_APP_URL || 'https://www.accio.com/work/app';
 const DEFAULT_TIMEOUT_S = Number(process.env.ACCIO_TIMEOUT_S || 180);
 const POLL_INTERVAL_MS = 200;
+const CDP_PORT = Number(process.env.ACCIO_CDP_PORT || 9333);
 
 /** @type {import('playwright').Browser|null} */
 let browser = null;
@@ -34,19 +37,179 @@ let currentAccountName = null;
 let usedCdp = false;
 /** Busy lock for serializing chat requests */
 let busy = false;
+/** Child process when we spawn Chrome ourselves for CDP */
+let chromeChild = null;
 
+/**
+ * Resolve user-data-dir + optional profile directory for an account.
+ * @returns {{ userDataDir: string, profileDirectory: string|null }}
+ */
 function resolveProfile(account) {
   const name = account.name;
-  // If user set a custom chrome_profile, use that as --user-data-dir
-  if (account.chrome_profile) {
-    const cp = account.chrome_profile;
-    platform.ensureProfileDir(name); // fallback dir just in case
-    console.log(`[browser] usando chrome_profile personalizado: ${cp}`);
-    return cp;
+
+  // Explicit user-data-dir + profile-directory (preferred after setCustomProfile)
+  if (account.chrome_user_data_dir) {
+    return {
+      userDataDir: account.chrome_user_data_dir,
+      profileDirectory: account.chrome_profile_directory || 'Default',
+    };
   }
+
+  // Legacy field: chrome_profile may be User Data or User Data\Default
+  if (account.chrome_profile) {
+    const parsed = platform.parseChromeProfilePath(account.chrome_profile);
+    console.log(
+      `[browser] chrome_profile → userDataDir=${parsed.userDataDir} profile=${parsed.profileDirectory || '(root)'}`,
+    );
+    return {
+      userDataDir: parsed.userDataDir,
+      profileDirectory: parsed.profileDirectory,
+    };
+  }
+
+  // Dedicated automation profile (empty until user logs in once)
   const winDir = account.win_data_dir || platform.winProfileDir(name);
   platform.ensureProfileDir(name);
-  return winDir;
+  return { userDataDir: winDir, profileDirectory: null };
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function waitCdpHttp(host, port, timeoutMs = 45000) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const url = `http://${host}:${port}/json/version`;
+    let lastErr = null;
+
+    function attempt() {
+      if (Date.now() > deadline) {
+        reject(new Error(`CDP HTTP não respondeu em ${timeoutMs}ms (${url}): ${lastErr}`));
+        return;
+      }
+      const req = http.get(url, { timeout: 2000 }, (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            console.log(`[browser] CDP ok: ${data.Browser || 'connected'}`);
+            resolve(data);
+          } catch (err) {
+            lastErr = err.message;
+            setTimeout(attempt, 400);
+          }
+        });
+      });
+      req.on('error', (err) => {
+        lastErr = err.message;
+        setTimeout(attempt, 400);
+      });
+      req.on('timeout', () => {
+        req.destroy();
+        lastErr = 'timeout';
+        setTimeout(attempt, 400);
+      });
+    }
+    attempt();
+  });
+}
+
+/**
+ * Spawn real Chrome (not Playwright-managed) with remote debugging.
+ * Looks like a normal browser → Google login works much better.
+ */
+function spawnChromeCdp({ userDataDir, profileDirectory, headless, url }) {
+  const chromePath = platform.chromeExe();
+  const args = [
+    `--remote-debugging-port=${CDP_PORT}`,
+    '--remote-allow-origins=*',
+    `--user-data-dir=${userDataDir}`,
+    ...platform.stealthChromeArgs(),
+    '--new-window',
+  ];
+  if (profileDirectory) {
+    args.push(`--profile-directory=${profileDirectory}`);
+  }
+  if (headless) {
+    args.push('--headless=new');
+  }
+  args.push(url || ACCIO_URL);
+
+  console.log(
+    `[browser] spawn Chrome (CDP) exe=${chromePath} userDataDir=${userDataDir}` +
+      (profileDirectory ? ` profile=${profileDirectory}` : ''),
+  );
+
+  const child = spawn(chromePath, args, {
+    stdio: 'ignore',
+    detached: true,
+    windowsHide: false,
+  });
+  child.on('error', (err) => {
+    console.error(`[browser] falha ao spawn Chrome: ${err.message}`);
+  });
+  child.unref();
+  chromeChild = child;
+  return child;
+}
+
+/**
+ * Hide webdriver flag + common automation traces in every new document.
+ * @param {import('playwright').BrowserContext} ctx
+ */
+async function applyStealth(ctx) {
+  try {
+    await ctx.addInitScript(() => {
+      try {
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => undefined,
+        });
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        // Chrome automation extension leftover
+        // eslint-disable-next-line no-undef
+        window.chrome = window.chrome || { runtime: {} };
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) =>
+          parameters && parameters.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : originalQuery(parameters);
+      } catch (_) {
+        /* ignore */
+      }
+    });
+  } catch (err) {
+    console.warn(`[browser] stealth initScript: ${err.message}`);
+  }
+}
+
+/**
+ * Connect Playwright to an already-running Chrome via CDP.
+ */
+async function connectCdp(host = '127.0.0.1', port = CDP_PORT) {
+  browser = await chromium.connectOverCDP(`http://${host}:${port}`);
+  usedCdp = true;
+
+  if (browser.contexts().length > 0) {
+    context = browser.contexts()[0];
+    page =
+      context.pages().find((p) => (p.url() || '').includes('accio.com')) ||
+      context.pages()[0] ||
+      (await context.newPage());
+  } else {
+    context = await browser.newContext();
+    page = await context.newPage();
+  }
+  await applyStealth(context);
+  return { browser, context, page };
 }
 
 /**
@@ -61,69 +224,101 @@ async function launchForAccount(account, opts = {}) {
 
   await closeBrowser();
 
-  const profileDir = resolveProfile(account);
+  const { userDataDir, profileDirectory } = resolveProfile(account);
   const chromePath = platform.chromeExe();
 
-  // Strategy 1: launchPersistentContext (works natively on Windows)
+  // ── Strategy A (preferred): real Chrome + CDP ─────────────────
+  // Playwright-managed browsers set automation flags that Google blocks.
+  // Spawning chrome.exe ourselves + connectOverCDP looks like normal Chrome.
   try {
     console.log(
-      `[browser] launchPersistentContext… chrome=${chromePath} profile=${profileDir} headless=${isHeadless}`,
+      `[browser] tentando Chrome real + CDP… userDataDir=${userDataDir}` +
+        (profileDirectory ? ` profile=${profileDirectory}` : '') +
+        ` headless=${isHeadless}`,
     );
-    context = await chromium.launchPersistentContext(profileDir, {
+    // Best-effort: free the CDP port if a previous chrome is stuck
+    try {
+      relay.killChromeProfile(
+        require('path').basename(String(userDataDir).replace(/\\/g, '/')),
+      );
+    } catch (_) {
+      /* ignore */
+    }
+    await sleep(800);
+
+    spawnChromeCdp({
+      userDataDir,
+      profileDirectory,
+      headless: isHeadless,
+      url: ACCIO_URL,
+    });
+    await sleep(1500);
+    await waitCdpHttp('127.0.0.1', CDP_PORT, 45000);
+    await connectCdp('127.0.0.1', CDP_PORT);
+
+    currentAccountName = account.name;
+    accounts.touchAccount(account.name);
+    console.log('[browser] Chrome real + CDP OK (melhor para login Google)');
+    return { page, context, usedCdp: true };
+  } catch (err) {
+    console.warn(`[browser] Chrome+CDP falhou: ${err.message}`);
+    if (forLogin) {
+      // Login MUST work with Google — try harder / clearer error
+      console.warn('[browser] fallback launchPersistentContext (login Google pode falhar)…');
+    }
+  }
+
+  // ── Strategy B: launchPersistentContext with stealth ──────────
+  try {
+    const args = platform.stealthChromeArgs();
+    if (profileDirectory) {
+      args.push(`--profile-directory=${profileDirectory}`);
+    }
+
+    console.log(
+      `[browser] launchPersistentContext… chrome=${chromePath} userDataDir=${userDataDir}`,
+    );
+    context = await chromium.launchPersistentContext(userDataDir, {
       executablePath: chromePath,
       headless: isHeadless,
-      channel: undefined,
-      args: [
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-popup-blocking',
+      args,
+      // Don't force a viewport — another automation signal
+      viewport: null,
+      ignoreDefaultArgs: [
+        '--enable-automation',
+        '--enable-blink-features=IdleDetection',
       ],
-      viewport: { width: 1280, height: 900 },
-      ignoreDefaultArgs: ['--enable-automation'],
+      // Avoid Playwright's default "Chromium" branding when possible
+      channel: undefined,
     });
     usedCdp = false;
+    await applyStealth(context);
     page = context.pages()[0] || (await context.newPage());
     currentAccountName = account.name;
     accounts.touchAccount(account.name);
     console.log('[browser] launchPersistentContext OK');
     return { page, context, usedCdp: false };
   } catch (err) {
-    console.warn(
-      `[browser] launchPersistentContext falhou: ${err.message}`,
-    );
-    // On pure Windows we do NOT fall back to WSL relay
+    console.warn(`[browser] launchPersistentContext falhou: ${err.message}`);
     if (platform.IS_WIN) {
       throw new Error(
         `Não consegui abrir o Chrome em ${chromePath}. ` +
-          `Confira se o Chrome está instalado. Detalhe: ${err.message}`,
+          `Feche todas as janelas do Chrome que usam esse profile e tente de novo. ` +
+          `Detalhe: ${err.message}`,
       );
     }
     console.warn('[browser] Tentando CDP relay (WSL)…');
   }
 
-  // Strategy 2: CDP relay (WSL only)
-  const { host, port } = await relay.bootstrapCdp(profileDir, {
+  // ── Strategy C: WSL CDP relay (legacy) ────────────────────────
+  const { host, port } = await relay.bootstrapCdp(userDataDir, {
     headless: isHeadless,
     url: ACCIO_URL,
   });
-
-  browser = await chromium.connectOverCDP(`http://${host}:${port}`);
-  usedCdp = true;
-
-  if (browser.contexts().length > 0) {
-    context = browser.contexts()[0];
-    page =
-      context.pages().find((p) => (p.url() || '').includes('accio.com')) ||
-      context.pages()[0] ||
-      (await context.newPage());
-  } else {
-    context = await browser.newContext();
-    page = await context.newPage();
-  }
-
+  await connectCdp(host, port);
   currentAccountName = account.name;
   accounts.touchAccount(account.name);
-  console.log(`[browser] CDP connect OK (${host}:${port})`);
+  console.log(`[browser] CDP relay OK (${host}:${port})`);
   return { page, context, usedCdp: true };
 }
 
@@ -382,22 +577,26 @@ async function openForLogin(accountName) {
   await ensureOnAccio(page);
   console.log(`[browser] Chrome aberto para login da conta "${accountName}".`);
   console.log(
-    '[browser] Faça o login no Chrome e feche esta opção quando terminar.',
+    '[browser] Faça o login no Chrome (Google deve funcionar neste modo CDP).',
+  );
+  console.log(
+    '[browser] Dica: se o Google ainda bloquear, feche o Chrome normal e use um profile dedicado (C:\\temp\\accio-profiles\\...).',
   );
   return page;
 }
 
 async function closeBrowser() {
   try {
-    if (context && !usedCdp) {
-      await context.close();
+    if (browser && usedCdp) {
+      // Disconnect Playwright only — leave Chrome open so session stays warm
+      await browser.close();
     }
   } catch (_) {
     /* ignore */
   }
   try {
-    if (browser && usedCdp) {
-      await browser.close();
+    if (context && !usedCdp) {
+      await context.close();
     }
   } catch (_) {
     /* ignore */
@@ -407,6 +606,7 @@ async function closeBrowser() {
   page = null;
   currentAccountName = null;
   usedCdp = false;
+  chromeChild = null;
 }
 
 function isBusy() {
@@ -419,7 +619,11 @@ function getStatus() {
     hasPage: !!(page && !page.isClosed()),
     usedCdp,
     busy,
-    platform: platform.IS_WIN ? 'win32' : platform.IS_WSL ? 'wsl' : process.platform,
+    platform: platform.IS_WIN
+      ? 'win32'
+      : platform.IS_WSL
+        ? 'wsl'
+        : process.platform,
     url: page && !page.isClosed() ? page.url() : null,
   };
 }

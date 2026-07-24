@@ -148,6 +148,7 @@ function remove(name) {
 
 /**
  * Set a custom Chrome profile path for an account.
+ * Accepts User Data, User Data\Default, or a dedicated user-data-dir.
  * @param {string} name
  * @param {string} profilePath
  */
@@ -155,8 +156,17 @@ function setCustomProfile(name, profilePath) {
   const data = load();
   const acct = data.accounts.find((a) => a.name === name);
   if (!acct) throw new Error(`Conta "${name}" não encontrada.`);
+
+  const parsed = platform.parseChromeProfilePath(profilePath);
+  // Keep legacy field for display / older code
   acct.chrome_profile = profilePath;
+  acct.chrome_user_data_dir = parsed.userDataDir;
+  acct.chrome_profile_directory = parsed.profileDirectory;
   save(data);
+  return {
+    userDataDir: parsed.userDataDir,
+    profileDirectory: parsed.profileDirectory,
+  };
 }
 
 /**

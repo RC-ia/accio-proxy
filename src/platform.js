@@ -33,6 +33,50 @@ function chromeExe() {
   return '/mnt/c/Program Files/Google/Chrome/Application/chrome.exe';
 }
 
+/** Default Windows Chrome "User Data" dir for the current user. */
+function defaultChromeUserDataDir() {
+  if (IS_WIN) {
+    return path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'User Data');
+  }
+  // WSL view of Windows user — best-effort
+  return '/mnt/c/Users/Adoro/AppData/Local/Google/Chrome/User Data';
+}
+
+/**
+ * Parse a user-provided Chrome profile path into:
+ *   { userDataDir, profileDirectory }
+ *
+ * Accepts either:
+ *   - ...\User Data                  → profileDirectory = Default
+ *   - ...\User Data\Default
+ *   - ...\User Data\Profile 1
+ *   - any other dir used as full user-data-dir (profileDirectory = null)
+ */
+function parseChromeProfilePath(input) {
+  if (!input || typeof input !== 'string') {
+    return { userDataDir: null, profileDirectory: null };
+  }
+  let p = input.trim().replace(/^["']|["']$/g, '');
+  // Normalize trailing separators
+  p = p.replace(/[\\/]+$/, '');
+
+  const base = path.basename(p);
+  const parent = path.dirname(p);
+
+  // If ends with Default / Profile N / Profile N (pt) → treat parent as User Data
+  if (/^(Default|Profile \d+|Guest Profile|System Profile)$/i.test(base)) {
+    return { userDataDir: parent, profileDirectory: base };
+  }
+
+  // If path itself looks like "User Data", use Default inside it
+  if (/User Data$/i.test(p) || /Chrome$/i.test(base)) {
+    return { userDataDir: p, profileDirectory: 'Default' };
+  }
+
+  // Dedicated automation profile (our C:\temp\accio-profiles\x): use as full user-data-dir
+  return { userDataDir: p, profileDirectory: null };
+}
+
 /** Windows-style profile dir (always backslash path for Chrome --user-data-dir). */
 function winProfileDir(accountName) {
   const safe = String(accountName).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -56,11 +100,32 @@ function ensureProfileDir(accountName) {
   return dir;
 }
 
+/**
+ * Args that make Chrome look less like automation (helps Google login).
+ * Never use these alone if Google still blocks — prefer real profile + CDP.
+ */
+function stealthChromeArgs(extra = []) {
+  return [
+    '--disable-blink-features=AutomationControlled',
+    '--disable-infobars',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-popup-blocking',
+    '--disable-features=IsolateOrigins,site-per-process',
+    '--password-store=basic',
+    '--use-mock-keychain',
+    ...extra,
+  ];
+}
+
 module.exports = {
   IS_WIN,
   IS_WSL,
   chromeExe,
+  defaultChromeUserDataDir,
+  parseChromeProfilePath,
   winProfileDir,
   profileFsPath,
   ensureProfileDir,
+  stealthChromeArgs,
 };
