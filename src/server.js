@@ -70,11 +70,9 @@ function lastUserText(messages) {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error('messages deve ser um array não-vazio');
   }
-  // Prefer last user message; fall back to last message of any role
   let msg =
     [...messages].reverse().find((m) => m.role === 'user') ||
     messages[messages.length - 1];
-
   if (typeof msg.content === 'string') return msg.content;
   if (Array.isArray(msg.content)) {
     return msg.content
@@ -119,36 +117,46 @@ app.get('/v1/accounts', (_req, res) => {
 });
 
 // ── POST /v1/accounts ───────────────────────────────────────────
-// Body: { name: "accountName" }  — switch active account
-// Optional: { name, action: "add" | "switch" | "remove" }
 app.post('/v1/accounts', async (req, res) => {
   try {
     const { name, action = 'switch' } = req.body || {};
     if (!name || typeof name !== 'string') {
-      return res.status(400).json({ error: { message: 'Campo "name" é obrigatório' } });
+      return res.status(400).json({
+        error: { message: 'Campo "name" é obrigatório' },
+      });
     }
 
     if (action === 'add') {
-      const acct = accounts.add(name);
+      accounts.add(name);
       accounts.setActive(name);
-      // Close current browser so next request uses new account
       await browser.closeBrowser();
-      return res.json({ ok: true, action: 'add', account: acct, active: name });
+      return res.json({ ok: true, action: 'add', active: name });
     }
 
     if (action === 'remove') {
       const ok = accounts.remove(name);
       if (!ok) {
-        return res.status(404).json({ error: { message: `Conta "${name}" não encontrada` } });
+        return res
+          .status(404)
+          .json({
+            error: { message: `Conta "${name}" não encontrada` },
+          });
       }
       await browser.closeBrowser();
-      return res.json({ ok: true, action: 'remove', name, active: accounts.getActiveName() });
+      return res.json({
+        ok: true,
+        action: 'remove',
+        name,
+        active: accounts.getActiveName(),
+      });
     }
 
     // default: switch
     const ok = accounts.setActive(name);
     if (!ok) {
-      return res.status(404).json({ error: { message: `Conta "${name}" não encontrada` } });
+      return res
+        .status(404)
+        .json({ error: { message: `Conta "${name}" não encontrada` } });
     }
     await browser.closeBrowser();
     return res.json({ ok: true, action: 'switch', active: name });
@@ -168,18 +176,24 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     userText = lastUserText(body.messages);
   } catch (err) {
-    return res.status(400).json({
-      error: { message: err.message, type: 'invalid_request_error' },
-    });
+    return res
+      .status(400)
+      .json({
+        error: { message: err.message, type: 'invalid_request_error' },
+      });
   }
 
   if (!userText || !userText.trim()) {
-    return res.status(400).json({
-      error: { message: 'Mensagem do usuário vazia', type: 'invalid_request_error' },
-    });
+    return res
+      .status(400)
+      .json({
+        error: {
+          message: 'Mensagem do usuário vazia',
+          type: 'invalid_request_error',
+        },
+      });
   }
 
-  // Check active account
   if (!accounts.getActiveName()) {
     return res.status(400).json({
       error: {
@@ -204,74 +218,88 @@ app.post('/v1/chat/completions', async (req, res) => {
   );
 
   if (stream) {
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    if (typeof res.flushHeaders === 'function') res.flushHeaders();
-
-    // Role chunk (OpenAI style)
-    res.write(
-      `data: ${JSON.stringify(
-        openaiChunk(id, model, null),
-      ).replace(
-        '"delta":{}',
-        '"delta":{"role":"assistant"}',
-      )}\n\n`,
-    );
-
-    let aborted = false;
-    req.on('close', () => {
-      aborted = true;
-    });
-
-    try {
-      const full = await browser.sendMessage(userText, {
-        stream: true,
-        onDelta: (delta) => {
-          if (aborted || res.writableEnded) return;
-          res.write(
-            `data: ${JSON.stringify(openaiChunk(id, model, delta))}\n\n`,
-          );
-        },
-      });
-
-      if (!aborted && !res.writableEnded) {
-        // Final empty delta with finish_reason
-        res.write(
-          `data: ${JSON.stringify(openaiChunk(id, model, null, 'stop'))}\n\n`,
-        );
-        res.write('data: [DONE]\n\n');
-        res.end();
-      }
-      console.log(`[server] stream concluído (${(full || '').length} chars)`);
-    } catch (err) {
-      console.error('[server] stream error:', err.message);
-      if (!res.writableEnded) {
-        // Emit error as SSE comment + done, or as JSON if nothing sent
-        res.write(
-          `data: ${JSON.stringify({
-            error: { message: err.message, type: 'server_error' },
-          })}\n\n`,
-        );
-        res.write('data: [DONE]\n\n');
-        res.end();
-      }
-    }
+    handleStream(req, res, id, model, userText);
   } else {
-    // Non-streaming
     try {
       const full = await browser.sendMessage(userText, { stream: false });
       res.json(openaiCompletion(id, model, full));
-      console.log(`[server] completion concluída (${(full || '').length} chars)`);
+      console.log(
+        `[server] completion concluída (${(full || '').length} chars)`,
+      );
     } catch (err) {
       console.error('[server] completion error:', err.message);
-      res.status(500).json({
-        error: { message: err.message, type: 'server_error' },
-      });
+      res
+        .status(500)
+        .json({ error: { message: err.message, type: 'server_error' } });
     }
   }
 });
+
+async function handleStream(req, res, id, model, text) {
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  // Role chunk
+  res.write(
+    `data: ${JSON.stringify(openaiChunk(id, model, null)).replace(
+      '"delta":{}',
+      '"delta":{"role":"assistant"}',
+    )}\n\n`,
+  );
+
+  // Heartbeat every 15s to keep client from timing out while Accio generates
+  let aborted = false;
+  const heartbeat = setInterval(() => {
+    if (aborted || res.writableEnded) {
+      clearInterval(heartbeat);
+      return;
+    }
+    res.write(': heartbeat\n\n');
+  }, 15000);
+
+  req.on('close', () => {
+    aborted = true;
+    clearInterval(heartbeat);
+  });
+
+  try {
+    const full = await browser.sendMessage(text, {
+      stream: true,
+      onDelta: (delta) => {
+        if (aborted || res.writableEnded) return;
+        res.write(
+          `data: ${JSON.stringify(openaiChunk(id, model, delta))}\n\n`,
+        );
+      },
+    });
+
+    clearInterval(heartbeat);
+
+    if (!aborted && !res.writableEnded) {
+      res.write(
+        `data: ${JSON.stringify(openaiChunk(id, model, null, 'stop'))}\n\n`,
+      );
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+    console.log(`[server] stream concluído (${(full || '').length} chars)`);
+  } catch (err) {
+    clearInterval(heartbeat);
+    console.error('[server] stream error:', err.message);
+    if (!res.writableEnded) {
+      res.write(
+        `data: ${JSON.stringify({
+          error: { message: err.message, type: 'server_error' },
+        })}\n\n`,
+      );
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+  }
+}
 
 // ── GET /health ─────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
@@ -312,7 +340,6 @@ function startServer(port = PORT, host = HOST) {
   });
 }
 
-// Allow `node src/server.js` to start directly
 if (require.main === module) {
   startServer().catch((err) => {
     console.error('[server] fatal:', err);
