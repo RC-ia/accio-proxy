@@ -37,6 +37,13 @@ let busy = false;
 
 function resolveProfile(account) {
   const name = account.name;
+  // If user set a custom chrome_profile, use that as --user-data-dir
+  if (account.chrome_profile) {
+    const cp = account.chrome_profile;
+    platform.ensureProfileDir(name); // fallback dir just in case
+    console.log(`[browser] usando chrome_profile personalizado: ${cp}`);
+    return cp;
+  }
   const winDir = account.win_data_dir || platform.winProfileDir(name);
   platform.ensureProfileDir(name);
   return winDir;

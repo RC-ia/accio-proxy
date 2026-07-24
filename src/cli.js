@@ -28,8 +28,9 @@ function printMenu() {
   console.log('  2) Trocar conta ativa');
   console.log('  3) Listar contas');
   console.log('  4) Remover conta');
-  console.log('  5) Iniciar servidor API');
-  console.log('  6) Sair');
+  console.log('  5) Definir profile Chrome personalizado');
+  console.log('  6) Iniciar servidor API');
+  console.log('  7) Sair');
   console.log('══════════════════════════════════');
 }
 
@@ -138,6 +139,45 @@ async function optionRemove() {
   }
 }
 
+async function optionCustomProfile() {
+  const list = accounts.list();
+  if (list.length === 0) {
+    console.log('⚠️  Nenhuma conta cadastrada. Crie uma com a opção 1 primeiro.');
+    return;
+  }
+  list.forEach((a, i) => console.log(`  ${i + 1}) ${a.name}`));
+  const raw = (await question('Número ou nome da conta: ')).trim();
+  if (!raw) return;
+
+  let name = raw;
+  const num = Number(raw);
+  if (!Number.isNaN(num) && num >= 1 && num <= list.length) {
+    name = list[num - 1].name;
+  }
+
+  const account = accounts.find(name);
+  if (!account) {
+    console.log(`❌ Conta "${name}" não encontrada.`);
+    return;
+  }
+
+  console.log('');
+  console.log('💡 Informe o caminho do profile Chrome que já existe.');
+  console.log('Ex: C:\\Users\\SeuNome\\AppData\\Local\\Google\\Chrome\\User Data\\Default\n');
+  console.log('Ou C:\\Users\\SeuNome\\AppData\\Local\\Google\\Chrome\\User Data');
+  console.log('');
+
+  const profilePath = (await question('Caminho do profile: ')).trim();
+  if (!profilePath) {
+    console.log('Cancelado.');
+    return;
+  }
+
+  accounts.setCustomProfile(name, profilePath);
+  await browser.closeBrowser();
+  console.log(`✅ Profile personalizado definido para "${name}": ${profilePath}`);
+}
+
 async function optionServer() {
   if (!accounts.getActiveName()) {
     console.log(
@@ -195,9 +235,12 @@ async function mainLoop() {
         await optionRemove();
         break;
       case '5':
-        await optionServer();
+        await optionCustomProfile();
         break;
       case '6':
+        await optionServer();
+        break;
+      case '7':
       case 'q':
       case 'quit':
       case 'sair':

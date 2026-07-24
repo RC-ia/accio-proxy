@@ -1,6 +1,6 @@
 // src/accounts.js
 // Account CRUD — manages accounts.json
-// Each account: { name, user_data_dir, win_data_dir, created_at, last_used }
+// Each account: { name, user_data_dir, win_data_dir, created_at, last_used, chrome_profile }
 
 const fs = require('fs');
 const path = require('path');
@@ -103,7 +103,6 @@ function add(name) {
 
   const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_');
   const user_data_dir = path.join(PROFILES_DIR, safeName);
-  // Windows path must use backslashes — path.join() on Linux would mess it up.
   const win_data_dir = `${WIN_PROFILES_BASE}\\${safeName}`;
 
   // Create local + Windows-facing profile dirs
@@ -118,6 +117,7 @@ function add(name) {
     name,
     user_data_dir,
     win_data_dir,
+    chrome_profile: null, // user can set this later
     created_at: new Date().toISOString(),
     last_used: null,
   };
@@ -147,6 +147,19 @@ function remove(name) {
 }
 
 /**
+ * Set a custom Chrome profile path for an account.
+ * @param {string} name
+ * @param {string} profilePath
+ */
+function setCustomProfile(name, profilePath) {
+  const data = load();
+  const acct = data.accounts.find((a) => a.name === name);
+  if (!acct) throw new Error(`Conta "${name}" não encontrada.`);
+  acct.chrome_profile = profilePath;
+  save(data);
+}
+
+/**
  * Update last_used timestamp for an account.
  * @param {string} name
  */
@@ -170,6 +183,7 @@ module.exports = {
   getActiveName,
   setActive,
   touchAccount,
+  setCustomProfile,
   PROFILES_DIR,
   ACCOUNTS_FILE,
 };
