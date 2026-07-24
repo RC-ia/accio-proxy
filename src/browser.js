@@ -346,18 +346,43 @@ async function ensureOnAccio(p) {
   const url = p.url() || '';
   if (url.includes('accio.com')) {
     if (!url.includes('/work') && !url.includes('/app')) {
-      try {
-        await p.goto(ACCIO_APP_URL, {
-          waitUntil: 'domcontentloaded',
-          timeout: 120000,
-        });
-      } catch (_) {
-        /* stay */
-      }
+      // Landing page or login — navigate to the app
+      await navigateToApp(p);
     }
-    return;
+    // Wait up to 2 min for the chat editor to appear (may need login)
+    return waitForEditor(p);
   }
+  // Start from scratch
   await p.goto(ACCIO_URL, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  return navigateToApp(p);
+}
+
+async function navigateToApp(p) {
+  try {
+    await p.goto(ACCIO_APP_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 120000,
+    });
+  } catch (_) {
+    /* timeout is OK — page may redirect for login */
+  }
+  return waitForEditor(p);
+}
+
+async function waitForEditor(p) {
+  try {
+    await p.waitForSelector('.chat-input-scrollable', {
+      state: 'attached',
+      timeout: 120000,
+    });
+    console.log('[browser] editor .chat-input-scrollable encontrado');
+  } catch (_) {
+    console.warn(
+      '[browser] editor .chat-input-scrollable não apareceu em 120s.',
+    );
+    // Don't throw — user might be on login page; sendMessage will fail with
+    // a clear error and the user can log in first.
+  }
 }
 
 async function installWatcher(p) {
@@ -390,6 +415,20 @@ async function sendMessage(text, opts = {}) {
       headless: process.env.ACCIO_HEADLESS === '1',
     });
     await ensureOnAccio(p);
+
+    // Check if editor is actually present before proceeding
+    const hasEditor = await p.evaluate(
+      () => !!document.querySelector('.chat-input-scrollable'),
+    );
+    if (!hasEditor) {
+      const currentUrl = p.url();
+      throw new Error(
+        `Editor de chat não encontrado em ${currentUrl}. ` +
+          'É necessário fazer login primeiro (opção 1 do menu), ' +
+          'ou o Accio pode estar fora do ar/mudou de URL.',
+      );
+    }
+
     await installWatcher(p);
     await p.evaluate(RESET_DONE_FN);
 
