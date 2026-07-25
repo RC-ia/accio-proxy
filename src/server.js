@@ -73,6 +73,31 @@ const DEFAULT_SYSTEM_PROMPT = [
   'Responda em português a menos que o usuário peça outro idioma.',
 ].join('\n');
 
+const fs = require('fs');
+const path = require('path');
+
+const PROJECT_DIR = path.resolve(__dirname, '..');
+
+/**
+ * Load SOUL.md and AGENTS.md from the project directory, if they exist.
+ * Returns an array of { name, content } objects.
+ */
+function loadMarkdownFiles() {
+  const files = [];
+  for (const name of ['SOUL.md', 'AGENTS.md', 'CLAUDE.md', '.cursorrules']) {
+    const p = path.join(PROJECT_DIR, name);
+    try {
+      if (fs.existsSync(p)) {
+        const content = fs.readFileSync(p, 'utf-8').trim();
+        if (content) files.push({ name, content });
+      }
+    } catch (_) {
+      /* ignore unreadable */
+    }
+  }
+  return files;
+}
+
 function buildFullPrompt(messages) {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error('messages deve ser um array não-vazio');
@@ -82,38 +107,48 @@ function buildFullPrompt(messages) {
   const clientSystemMessages = messages.filter((m) => m.role === 'system');
   const nonSystemMessages = messages.filter((m) => m.role !== 'system');
 
-  // Build prompt with default system + client system + conversation
+  // Build prompt with md files + client system + conversation
   const lines = [];
 
-  // Default system instructions (subtle — no mention of "accio" or "proxy")
-  lines.push(`Instruções:\n${DEFAULT_SYSTEM_PROMPT}`);
+  // 1. Carrega SOUL.md, AGENTS.md, etc. do disco
+  const mdFiles = loadMarkdownFiles();
+  for (const md of mdFiles) {
+    lines.push(`# ${md.name}\n${md.content}`);
+  }
 
-  // Append client system messages if any
+  // 2. Default system instructions
+  lines.push(`## Instruções\n${DEFAULT_SYSTEM_PROMPT}`);
+
+  // 3. Client system messages
   for (const sys of clientSystemMessages) {
     let text = '';
     if (typeof sys.content === 'string') text = sys.content;
     else if (Array.isArray(sys.content)) {
       text = sys.content
-        .map((p) => (typeof p === 'string' ? p : p.type === 'text' ? p.text || '' : ''))
+        .map((p) =>
+          typeof p === 'string' ? p : p.type === 'text' ? p.text || '' : '',
+        )
         .join('');
     }
     if (text.trim()) {
-      lines.push(`Instruções adicionais:\n${text}`);
+      lines.push(`## Instruções adicionais\n${text}`);
     }
   }
 
-  // Role-labeled conversation
+  // 4. Role-labeled conversation
   for (const m of nonSystemMessages) {
     let text = '';
     if (typeof m.content === 'string') text = m.content;
     else if (Array.isArray(m.content)) {
       text = m.content
-        .map((p) => (typeof p === 'string' ? p : p.type === 'text' ? p.text || '' : ''))
+        .map((p) =>
+          typeof p === 'string' ? p : p.type === 'text' ? p.text || '' : '',
+        )
         .join('');
     }
     if (!text.trim()) continue;
-    if (m.role === 'user') lines.push(`Usuário: ${text}`);
-    else if (m.role === 'assistant') lines.push(`Assistente: ${text}`);
+    if (m.role === 'user') lines.push(`## Usuário\n${text}`);
+    else if (m.role === 'assistant') lines.push(`## Assistente\n${text}`);
     else lines.push(text);
   }
 
