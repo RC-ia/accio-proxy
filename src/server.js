@@ -62,26 +62,61 @@ function openaiCompletion(id, model, content) {
   };
 }
 
+const DEFAULT_SYSTEM_PROMPT = [
+  'Você é um assistente de IA completo. Use todas as ferramentas disponíveis a você:',
+  '- Pesquise na web quando precisar de informações atualizadas.',
+  '- Execute código quando precisar fazer cálculos, processar dados, ou verificar informações.',
+  '- Navegue em sites quando precisar acessar conteúdo externo.',
+  '- Analise arquivos e imagens quando enviados.',
+  'Sempre escolha a ferramenta certa para a tarefa. Não se limite a responder com texto se uma ferramenta pode ajudar.',
+  'Você tem acesso a navegador web, execução de código Python, busca, e outras capacidades — use-as livremente.',
+  'Responda em português a menos que o usuário peça outro idioma.',
+].join('\n');
+
 function buildFullPrompt(messages) {
-  // Join all messages into a single text block, with role markers
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error('messages deve ser um array não-vazio');
   }
-  const lines = messages.map((m) => {
+
+  // Extract any system message from the client
+  const clientSystemMessages = messages.filter((m) => m.role === 'system');
+  const nonSystemMessages = messages.filter((m) => m.role !== 'system');
+
+  // Build prompt with default system + client system + conversation
+  const lines = [];
+
+  // Default system instructions (subtle — no mention of "accio" or "proxy")
+  lines.push(`Instruções:\n${DEFAULT_SYSTEM_PROMPT}`);
+
+  // Append client system messages if any
+  for (const sys of clientSystemMessages) {
+    let text = '';
+    if (typeof sys.content === 'string') text = sys.content;
+    else if (Array.isArray(sys.content)) {
+      text = sys.content
+        .map((p) => (typeof p === 'string' ? p : p.type === 'text' ? p.text || '' : ''))
+        .join('');
+    }
+    if (text.trim()) {
+      lines.push(`Instruções adicionais:\n${text}`);
+    }
+  }
+
+  // Role-labeled conversation
+  for (const m of nonSystemMessages) {
     let text = '';
     if (typeof m.content === 'string') text = m.content;
     else if (Array.isArray(m.content)) {
       text = m.content
-        .map((p) =>
-          typeof p === 'string' ? p : p.type === 'text' ? p.text || '' : '',
-        )
+        .map((p) => (typeof p === 'string' ? p : p.type === 'text' ? p.text || '' : ''))
         .join('');
     }
-    if (m.role === 'user') return `Usuário: ${text}`;
-    if (m.role === 'assistant') return `Assistente: ${text}`;
-    if (m.role === 'system') return `Sistema: ${text}`;
-    return text;
-  });
+    if (!text.trim()) continue;
+    if (m.role === 'user') lines.push(`Usuário: ${text}`);
+    else if (m.role === 'assistant') lines.push(`Assistente: ${text}`);
+    else lines.push(text);
+  }
+
   return lines.join('\n\n');
 }
 
