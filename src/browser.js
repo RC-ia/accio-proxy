@@ -391,7 +391,7 @@ async function installWatcher(p) {
 }
 
 /**
- * @param {string} text
+ * @param {string} text - full conversation text (all messages joined)
  * @param {object} opts
  * @param {boolean} [opts.stream=true]
  * @param {(delta: string, fullText: string) => void} [opts.onDelta]
@@ -414,13 +414,21 @@ async function sendMessage(text, opts = {}) {
     const p = await ensureBrowser({
       headless: process.env.ACCIO_HEADLESS === '1',
     });
-    await ensureOnAccio(p);
 
-    // Check if editor is actually present before proceeding
-    const hasEditor = await p.evaluate(
-      () => !!document.querySelector('.chat-input-scrollable'),
-    );
-    if (!hasEditor) {
+    // ── Recarrega a página para começar um novo chat ──────────
+    console.log('[browser] recarregando página para novo chat…');
+    await p.goto(ACCIO_APP_URL, {
+      waitUntil: 'domcontentloaded',
+      timeout: 120000,
+    });
+    // Aguarda o editor ficar pronto
+    try {
+      await p.waitForSelector('.chat-input-scrollable', {
+        state: 'attached',
+        timeout: 120000,
+      });
+      console.log('[browser] editor .chat-input-scrollable encontrado');
+    } catch (_) {
       const currentUrl = p.url();
       throw new Error(
         `Editor de chat não encontrado em ${currentUrl}. ` +

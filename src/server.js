@@ -62,6 +62,29 @@ function openaiCompletion(id, model, content) {
   };
 }
 
+function buildFullPrompt(messages) {
+  // Join all messages into a single text block, with role markers
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error('messages deve ser um array não-vazio');
+  }
+  const lines = messages.map((m) => {
+    let text = '';
+    if (typeof m.content === 'string') text = m.content;
+    else if (Array.isArray(m.content)) {
+      text = m.content
+        .map((p) =>
+          typeof p === 'string' ? p : p.type === 'text' ? p.text || '' : '',
+        )
+        .join('');
+    }
+    if (m.role === 'user') return `Usuário: ${text}`;
+    if (m.role === 'assistant') return `Assistente: ${text}`;
+    if (m.role === 'system') return `Sistema: ${text}`;
+    return text;
+  });
+  return lines.join('\n\n');
+}
+
 /**
  * Extract the last user message text from OpenAI-style messages array.
  * Also joins multi-part content arrays.
@@ -172,9 +195,9 @@ app.post('/v1/chat/completions', async (req, res) => {
   const stream = !!body.stream;
   const id = makeId();
 
-  let userText;
+  let fullPrompt;
   try {
-    userText = lastUserText(body.messages);
+    fullPrompt = buildFullPrompt(body.messages);
   } catch (err) {
     return res
       .status(400)
@@ -183,12 +206,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
   }
 
-  if (!userText || !userText.trim()) {
+  if (!fullPrompt || !fullPrompt.trim()) {
     return res
       .status(400)
       .json({
         error: {
-          message: 'Mensagem do usuário vazia',
+          message: 'Mensagem vazia após montar prompt completo',
           type: 'invalid_request_error',
         },
       });
@@ -214,14 +237,14 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 
   console.log(
-    `[server] chat/completions stream=${stream} model=${model} chars=${userText.length}`,
+    `[server] chat/completions stream=${stream} model=${model} prompt=${(fullPrompt || '').length} chars`,
   );
 
   if (stream) {
-    handleStream(req, res, id, model, userText);
+    handleStream(req, res, id, model, fullPrompt);
   } else {
     try {
-      const full = await browser.sendMessage(userText, { stream: false });
+      const full = await browser.sendMessage(fullPrompt, { stream: false });
       res.json(openaiCompletion(id, model, full));
       console.log(
         `[server] completion concluída (${(full || '').length} chars)`,
