@@ -273,15 +273,27 @@ async function handleStream(req, res, id, model, text) {
     )}\n\n`,
   );
 
-  // Heartbeat every 15s to keep client from timing out while Accio generates
+  // Heartbeat a cada 5s enquanto o modelo gera
+  // Envia chunk vazio no formato OpenAI: o cliente lê como "assistant pensando"
   let aborted = false;
+  let heartbeatCount = 0;
   const heartbeat = setInterval(() => {
     if (aborted || res.writableEnded) {
       clearInterval(heartbeat);
       return;
     }
-    res.write(': heartbeat\n\n');
-  }, 15000);
+    heartbeatCount++;
+
+    // A cada 15s (3º heartbeat) manda SSE comment
+    if (heartbeatCount % 3 === 0) {
+      res.write(': heartbeat\n\n');
+    }
+
+    // A cada 5s envia chunk com delta vazio — cliente interpreta como "ainda gerando"
+    res.write(
+      `data: ${JSON.stringify(openaiChunk(id, model, ''))}\n\n`,
+    );
+  }, 5000);
 
   req.on('close', () => {
     aborted = true;
